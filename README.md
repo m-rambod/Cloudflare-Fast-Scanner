@@ -54,36 +54,6 @@ The scanner dynamically replaces only the **IP address** while keeping **your ex
 
 ---
 
-## 📌 Why Multi-Port TCP Checking Matters
-
-Real Cloudflare CDN IPs usually behave in a **very specific way**:
-
-- They respond on **multiple standard CDN ports**
-- They behave consistently across those ports
-
-Fake, burned, or unofficial IPs usually:
-
-- Respond only on **one port (typically 443)**
-- Fail additional TCP checks
-
----
-
-## ✅ Recommended TCP Port Strategy
-
-### Official Cloudflare CDN IPs
-
-```json
-"TargetTcpPorts": [443, 8080]
-```
-
-### Non-official / Third-Party CDN IPs
-
-```json
-"TargetTcpPorts": [443]
-```
-
----
-
 ## 📄 Input File (`ip.txt`)
 
 Supports single IPs and CIDR ranges.
