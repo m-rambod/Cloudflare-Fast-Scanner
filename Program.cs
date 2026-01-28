@@ -1,4 +1,4 @@
-﻿using IPRangeConnectionChecker;
+using IPRangeConnectionChecker;
 using Microsoft.Extensions.Configuration;
 using System.Diagnostics;
 using System.Net;
@@ -8,7 +8,7 @@ using System.Threading.Channels;
 
 class Program
 {
-    // Global Configuration Object
+    // ================== GLOBAL CONFIGURATION & STATE ==================
     private static AppConfig? _config;
 
     // Resource Management
@@ -16,7 +16,7 @@ class Program
     private static readonly object ConsoleLock = new();
     private static readonly CancellationTokenSource MonitorCts = new();
 
-    // Statistics
+    // Statistics & Counters
     private static int _totalIps = 0;
     private static int _scannedCount = 0;
     private static int _tcpFound = 0;
@@ -26,15 +26,17 @@ class Program
     private static int _aliveFinal = 0;
     private static long _startTimeTicks;
 
-    // Live UI State
-    private static volatile string _currentTcpIp = "...";   // آخرین آی‌پی در حال بررسی پورت
-    private static volatile string _currentV2RayIp = "..."; // آخرین آی‌پی در حال تست پروکسی
+    // Live UI State (Volatile for thread safety on reads)
+    private static volatile string _currentTcpIp = "...";   // Last IP being checked for TCP
+    private static volatile string _currentV2RayIp = "..."; // Last IP being checked for V2Ray
+
     static async Task Main()
     {
         try
         {
             LoadConfiguration();
 
+            // Initialize Semaphore for V2Ray concurrency control
             _v2RaySemaphore = new SemaphoreSlim(_config!.Concurrency.MaxV2RayProcesses, _config.Concurrency.MaxV2RayProcesses);
             _startTimeTicks = DateTime.Now.Ticks;
 
@@ -42,6 +44,7 @@ class Program
             var allIps = await LoadIpsAsync();
             _totalIps = allIps.Count;
 
+            // Initial Console Setup
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine($"Total IPs to Scan: {_totalIps:N0}");
             Console.WriteLine($"TCP Workers: {_config.Concurrency.MaxConcurrencyTcp} | V2Ray Workers: {_config.Concurrency.MaxV2RayProcesses}");
@@ -49,24 +52,29 @@ class Program
             Console.WriteLine("------------------------------------------------------------");
             Console.ResetColor();
 
+            // Reset output file
             if (File.Exists(_config.Paths.OutputFilePath))
                 File.Delete(_config.Paths.OutputFilePath);
 
             var swTotal = Stopwatch.StartNew();
 
+            // Create a bounded channel to manage memory between TCP Producer and V2Ray Consumer
             var channel = Channel.CreateBounded<(IPAddress Ip, string IpString)>(
-                new BoundedChannelOptions(2000) { FullMode = BoundedChannelFullMode.Wait }
+                new BoundedChannelOptions(5000) { FullMode = BoundedChannelFullMode.Wait }
             );
 
             // Start Live UI Monitor
             var monitorTask = StartUiMonitorAsync(MonitorCts.Token);
 
+            // Start Processing Tasks
             var producerTask = ProduceTcpResults(allIps, channel.Writer);
             var consumerTask = ConsumeV2RayTests(channel.Reader);
 
+            // Wait for completion
             await producerTask;
             await consumerTask;
 
+            // Stop Monitor
             MonitorCts.Cancel();
             try { await monitorTask; } catch { }
 
@@ -103,7 +111,7 @@ class Program
             try
             {
                 UpdateStatusLine();
-                // Update fast (every 200ms) for smooth UI
+                // Update every 200ms for smooth UI
                 await Task.Delay(200, token);
             }
             catch (TaskCanceledException) { break; }
@@ -114,14 +122,16 @@ class Program
     {
         var elapsedSeconds = (DateTime.Now.Ticks - _startTimeTicks) / 10_000_000.0;
         if (elapsedSeconds < 1) elapsedSeconds = 1;
+
         var speed = _scannedCount / elapsedSeconds;
         int queueSize = _tcpFound - _v2rayChecked;
         if (queueSize < 0) queueSize = 0;
+
         double progress = _totalIps > 0 ? (_scannedCount * 100.0 / _totalIps) : 0;
 
         lock (ConsoleLock)
         {
-            // نمایش همزمان ورودی (TCP) و خروجی (V2Ray)
+            // Display current input (TCP) and output (V2Ray) status simultaneously
             var status = $"[{DateTime.Now:HH:mm:ss}] {progress:F1}% | Spd: {speed:F0}/s | Q: {queueSize} | Alive: {_aliveFinal} >> TCP: {_currentTcpIp} | V2Ray: {_currentV2RayIp}";
 
             int maxWidth = Console.WindowWidth - 1;
@@ -154,12 +164,12 @@ class Program
             // 1. Clear the current status line
             Console.Write($"\r{new string(' ', Console.WindowWidth - 1)}\r");
 
-            // 2. Print the log
+            // 2. Print the success log
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine($"[✓ FOUND] {DateTime.Now:HH:mm:ss} -> {msg}");
             Console.ResetColor();
 
-            // 3. Status line will be redrawn immediately by the monitor loop or next call
+            // 3. Status line will be redrawn immediately by the monitor loop
         }
     }
 
@@ -168,9 +178,10 @@ class Program
     static async Task ProduceTcpResults(List<IPAddress> allIps, ChannelWriter<(IPAddress Ip, string IpString)> writer)
     {
         var pOptions = new ParallelOptions { MaxDegreeOfParallelism = _config!.Concurrency.MaxConcurrencyTcp };
+
         await Parallel.ForEachAsync(allIps, pOptions, async (ip, ct) =>
         {
-            // آپدیت لحظه‌ای بخش TCP
+            // Real-time update for TCP status
             _currentTcpIp = ip.ToString();
 
             try
@@ -200,31 +211,47 @@ class Program
 
     static async Task ConsumeV2RayTests(ChannelReader<(IPAddress Ip, string IpString)> reader)
     {
-        var tasks = new List<Task>();
+        // Counter for active/pending V2Ray tasks
+        int pendingTasks = 0;
+
         while (await reader.WaitToReadAsync())
         {
             while (reader.TryRead(out var item))
             {
+                // Wait for an available slot based on semaphore limit
                 await _v2RaySemaphore!.WaitAsync();
-                tasks.Add(Task.Run(async () =>
+
+                Interlocked.Increment(ref pendingTasks);
+
+                // Execute managed Fire-and-Forget (without storing Task in a list)
+                _ = Task.Run(async () =>
                 {
-                    try { await TestV2RayConnection(item.IpString); }
+                    try
+                    {
+                        await TestV2RayConnection(item.IpString);
+                    }
                     finally
                     {
                         _v2RaySemaphore.Release();
                         Interlocked.Increment(ref _v2rayChecked);
+                        Interlocked.Decrement(ref pendingTasks);
                     }
-                }));
+                });
             }
         }
-        await Task.WhenAll(tasks);
+
+        // Wait for all pending V2Ray tasks to finish
+        while (pendingTasks > 0)
+        {
+            await Task.Delay(100);
+        }
     }
 
     // ================== V2RAY LOGIC ==================
 
     static async Task TestV2RayConnection(string ipAddress)
     {
-        // <<< این خط جا افتاده بود >>>
+        // Update live status
         _currentV2RayIp = ipAddress;
 
         Process? v2ray = null;
@@ -233,7 +260,7 @@ class Program
             int localPort = GetFreeTcpPort();
             string jsonConfig = CreateHttpV2RayConfig(ipAddress, localPort);
 
-            // Using Memory Config Injection
+            // Using Memory Config Injection (stdin)
             v2ray = StartV2RayProcess(jsonConfig);
 
             if (v2ray == null || v2ray.HasExited)
@@ -283,7 +310,7 @@ class Program
             var psi = new ProcessStartInfo
             {
                 FileName = exe,
-                Arguments = "run -c stdin:",
+                Arguments = "run -c stdin:", // Read config from Standard Input
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardInput = true,
@@ -318,9 +345,14 @@ class Program
             {
                 new {
                     protocol = "vless",
-                    settings = new { vnext = new[] { new { address = ipAddress, port = 443, users = new[] { new { id = v2ray.VlessUuid, encryption = "none" } } } } },
+                    settings = new {
+                        vnext = new[] {
+                            new { address = ipAddress, port = 443, users = new[] { new { id = v2ray.VlessUuid, encryption = "none" } } }
+                        }
+                    },
                     streamSettings = new {
-                        network = "ws", security = "tls",
+                        network = "ws",
+                        security = "tls",
                         tlsSettings = new { allowInsecure = true, serverName = v2ray.VlessSni, fingerprint = "chrome" },
                         wsSettings = new { path = v2ray.VlessPath, headers = new { Host = v2ray.VlessHost } }
                     }
@@ -343,6 +375,7 @@ class Program
             };
             using var client = new HttpClient(handler);
             client.Timeout = TimeSpan.FromMilliseconds(_config.Timeouts.HttpTestTimeoutMs);
+
             var resp = await client.GetAsync(_config.Network.TestUrl);
             return resp.IsSuccessStatusCode || resp.StatusCode == HttpStatusCode.NoContent;
         }
@@ -398,7 +431,14 @@ class Program
 
     static void CleanupProcess(Process? p)
     {
-        try { if (p != null && !p.HasExited) { p.Kill(); p.WaitForExit(100); } }
+        try
+        {
+            if (p != null && !p.HasExited)
+            {
+                p.Kill();
+                p.WaitForExit(100);
+            }
+        }
         catch { }
         finally { p?.Dispose(); }
     }
@@ -416,15 +456,52 @@ class Program
         var list = new List<IPAddress>();
         var path = _config!.Paths.InputFilePath;
         if (!File.Exists(path)) return list;
-        var lines = await File.ReadAllLinesAsync(path);
-        foreach (var line in lines)
+
+        await Task.Run(() =>
         {
-            var s = line.Trim();
-            if (string.IsNullOrEmpty(s) || s.StartsWith('#')) continue;
-            if (s.Contains('/')) list.AddRange(ExpandCidr(s));
-            else if (IPAddress.TryParse(s, out var ip)) list.Add(ip);
+            // Use ReadLines for streaming to reduce RAM overhead
+            foreach (var line in File.ReadLines(path))
+            {
+                var s = line.Trim();
+                if (string.IsNullOrEmpty(s) || s.StartsWith('#')) continue;
+
+                // Handle CIDR notation (e.g., 192.168.1.0/24)
+                if (s.Contains('/'))
+                {
+                    list.AddRange(ExpandCidr(s));
+                }
+                // Direct parsing without additional string allocation
+                else if (IPAddress.TryParse(s, out var ip))
+                {
+                    list.Add(ip);
+                }
+            }
+        });
+
+        // Remove duplicates
+        var distinctList = list.Distinct().ToList();
+
+        // Clear initial list to free RAM
+        list = null;
+        GC.Collect();
+
+        // Shuffle IPs if enabled
+        if (_config.Processing.ShuffleIps)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("Shuffling IPs...");
+            Console.ResetColor();
+            var rng = new Random();
+            int n = distinctList.Count;
+            while (n > 1)
+            {
+                n--;
+                int k = rng.Next(n + 1);
+                (distinctList[k], distinctList[n]) = (distinctList[n], distinctList[k]);
+            }
         }
-        return [.. list.Distinct()];
+
+        return distinctList;
     }
 
     static IEnumerable<IPAddress> ExpandCidr(string cidr)
@@ -432,10 +509,14 @@ class Program
         var parts = cidr.Split('/');
         var baseIp = IPAddress.Parse(parts[0]);
         int prefix = int.Parse(parts[1]);
+
+        // Convert to UInt32 (handling Endianness via Reverse for consistency)
         uint ip = BitConverter.ToUInt32([.. baseIp.GetAddressBytes().Reverse()], 0);
         uint count = (uint)(1 << (32 - prefix));
-        if (count > 65536) count = 65536;
-        for (uint i = 1; i < count - 1; i++) yield return new IPAddress([.. BitConverter.GetBytes(ip + i).Reverse()]);
+        if (count > 65536) count = 65536; // Safety cap
+
+        for (uint i = 1; i < count - 1; i++)
+            yield return new IPAddress([.. BitConverter.GetBytes(ip + i).Reverse()]);
     }
 
     static void PrintFinalReport(TimeSpan elapsed)
