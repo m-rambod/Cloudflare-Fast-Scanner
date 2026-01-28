@@ -1,4 +1,4 @@
-﻿
+
 
 namespace IPRangeConnectionChecker;
 
@@ -11,8 +11,12 @@ public class AppConfig
     public TimeoutsConfig Timeouts { get; set; } = new();
     public NetworkConfig Network { get; set; } = new();
     public V2RayConfig V2Ray { get; set; } = new();
+    public ProcessingConfig Processing { get; set; } = new();
 }
-
+public class ProcessingConfig
+{
+    public bool ShuffleIps { get; set; } = false; 
+}
 public class PathsConfig
 {
     public string InputFilePath { get; set; } = "ip.txt";
