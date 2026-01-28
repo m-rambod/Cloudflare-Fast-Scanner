@@ -45,7 +45,7 @@ class Program
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine($"Total IPs to Scan: {_totalIps:N0}");
             Console.WriteLine($"TCP Workers: {_config.Concurrency.MaxConcurrencyTcp} | V2Ray Workers: {_config.Concurrency.MaxV2RayProcesses}");
-            Console.WriteLine("Scan Started... (Logs will appear above, Status below)");
+            Console.WriteLine("Scan Started...");
             Console.WriteLine("------------------------------------------------------------");
             Console.ResetColor();
 
@@ -971,4 +971,5 @@ class Program
 //        Console.ReadLine();
 //    }
 //}
+
 
