@@ -54,6 +54,25 @@ The scanner dynamically replaces only the **IP address** while keeping **your ex
 
 ---
 
+## 🧩 Xray Core Requirement
+
+This program **requires the Xray core binary** to function.
+
+You **must manually download `xray.exe`** from the official Xray project:
+
+👉 https://github.com/XTLS/Xray-core
+
+### Setup Instructions
+
+1. Download the latest **Windows x64** release from the link above  
+2. Extract the archive  
+3. Copy **`xray.exe`**  
+4. Place it **next to this program’s executable file**
+
+⚠️ **Without `xray.exe`, this application will NOT work.**  
+
+---
+
 ## 📄 Input File (`ip.txt`)
 
 Supports single IPs and CIDR ranges.
